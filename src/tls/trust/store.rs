@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
-use btls::x509::store::{X509Store, X509StoreBuilder};
+use btls::x509::{
+    store::{X509Store, X509StoreBuilder},
+    verify::X509CheckFlags,
+};
 
 use super::{
     Certificate, CertificateInput,
@@ -110,6 +113,36 @@ impl CertStoreBuilder {
             && let Err(err) = builder.set_default_paths()
         {
             self.builder = Err(Error::tls(err));
+        }
+        self
+    }
+
+    /// Requires the peer certificate to be valid for `host`.
+    ///
+    /// The name is checked while the chain is verified against this store, which makes it
+    /// independent of the request URI. BoringSSL otherwise derives the name to verify from the
+    /// URI's host, and for a URI naming an IP address that is an `iPAddress` SAN match — so a
+    /// certificate that identifies its server by name cannot be verified at all when the
+    /// connection is made to a bare IP.
+    ///
+    /// Pair it with [`ClientBuilder::tls_verify_hostname(false)`]. With the URI-derived check left
+    /// on, the outcome depends on the URI: a host that parses as an IP address sets `ip` on the
+    /// connection's verify parameters and the name set here still applies, so both must match —
+    /// but a host that is a *name* sets `hosts` there, and inheriting those **replaces** the ones
+    /// set here, silently dropping this pin.
+    ///
+    /// Note also that the name lives on the store, not on the client: every client built from the
+    /// same [`CertStore`] inherits it. Build a store per identity rather than sharing one.
+    ///
+    /// [`ClientBuilder::tls_verify_hostname(false)`]: crate::ClientBuilder::tls_verify_hostname
+    pub fn verify_host<S: AsRef<str>>(mut self, host: S) -> Self {
+        if let Ok(ref mut builder) = self.builder {
+            let param = builder.verify_param_mut();
+            // Same host flags BoringSSL's own hostname verification uses.
+            param.set_hostflags(X509CheckFlags::NO_PARTIAL_WILDCARDS);
+            if let Err(err) = param.set_host(host.as_ref()) {
+                self.builder = Err(Error::tls(err));
+            }
         }
         self
     }
