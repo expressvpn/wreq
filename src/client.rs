@@ -78,6 +78,7 @@ use crate::{
         AlpnProtocol, TlsOptions, TlsVersion,
         keylog::KeyLog,
         session::{IntoTlsSessionCache, TlsSessionCache},
+        session_id::ClientHelloSessionId,
         trust::{CertStore, Identity},
     },
 };
@@ -220,6 +221,8 @@ struct Config {
     tls_verify_hostname: bool,
     tls_min_version: Option<TlsVersion>,
     tls_max_version: Option<TlsVersion>,
+    tls_client_hello_session_id: Option<ClientHelloSessionId>,
+    tls_preserve_alpn: bool,
     tls_session_cache: Option<Arc<dyn TlsSessionCache>>,
     tls_options: Option<TlsOptions>,
     http1_options: Option<Http1Options>,
@@ -309,6 +312,8 @@ impl Client {
                 tls_verify_hostname: true,
                 tls_min_version: None,
                 tls_max_version: None,
+                tls_client_hello_session_id: None,
+                tls_preserve_alpn: false,
                 tls_session_cache: None,
                 tls_options: None,
                 timer: Timer::default(),
@@ -525,6 +530,8 @@ impl ClientBuilder {
                     .verify_hostname(config.tls_verify_hostname)
                     .cert_verification(config.tls_cert_verification)
                     .session_store(config.tls_session_cache)
+                    .client_hello_session_id(config.tls_client_hello_session_id)
+                    .preserve_alpn(config.tls_preserve_alpn)
                 })
                 .with_http(|http| {
                     http.enforce_http(false);
@@ -1460,6 +1467,31 @@ impl ClientBuilder {
     #[inline]
     pub fn tls_sni(mut self, tls_sni: bool) -> ClientBuilder {
         self.config.tls_sni = tls_sni;
+        self
+    }
+
+    /// Keeps the ALPN list the emulation configured even when a request enforces an HTTP
+    /// version.
+    ///
+    /// Enforcing a version normally replaces the advertised protocols with the single one it
+    /// implies, which changes the ClientHello.
+    #[inline]
+    pub fn tls_preserve_alpn(mut self, preserve: bool) -> ClientBuilder {
+        self.config.tls_preserve_alpn = preserve;
+        self
+    }
+
+    /// Chooses the ClientHello `legacy_session_id` instead of letting BoringSSL fill it with
+    /// 32 random bytes.
+    ///
+    /// Consulted once per handshake. Such a handshake cannot also resume, and the session
+    /// cache is neither read nor written.
+    #[inline]
+    pub fn tls_client_hello_session_id<T>(mut self, source: T) -> ClientBuilder
+    where
+        T: Into<Option<ClientHelloSessionId>>,
+    {
+        self.config.tls_client_hello_session_id = source.into();
         self
     }
 

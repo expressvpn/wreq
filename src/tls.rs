@@ -7,6 +7,7 @@ pub(super) mod conn;
 pub mod compress;
 pub mod keylog;
 pub mod session;
+pub mod session_id;
 pub mod trust;
 
 use std::borrow::Cow;

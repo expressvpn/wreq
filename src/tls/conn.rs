@@ -32,6 +32,7 @@ use crate::{
         AlpnProtocol, AlpsProtocol, KeyShare, TlsOptions, TlsVersion,
         keylog::KeyLog,
         session::{Key, LruTlsSessionCache, TlsSession, TlsSessionCache},
+        session_id::{self, ClientHelloSessionId},
         trust::{CertStore, Identity},
     },
 };
@@ -53,6 +54,8 @@ pub struct HandshakeSettings {
     alps_use_new_codepoint: bool,
     key_shares: Option<Cow<'static, [KeyShare]>>,
     random_aes_hw_override: bool,
+    client_hello_session_id: Option<ClientHelloSessionId>,
+    preserve_alpn: bool,
 }
 
 /// A Connector using BoringSSL to support `http` and `https` schemes.
@@ -74,6 +77,8 @@ pub struct TlsConnectorBuilder {
     cert_verification: bool,
     keylog: Option<KeyLog>,
     session_cache: Arc<dyn TlsSessionCache>,
+    client_hello_session_id: Option<ClientHelloSessionId>,
+    preserve_alpn: bool,
 }
 
 /// A layer which wraps services in an `SslConnector`.
@@ -123,6 +128,8 @@ impl TlsConnector {
             cert_verification: true,
             keylog: None,
             session_cache: Arc::new(LruTlsSessionCache::new(8)),
+            client_hello_session_id: None,
+            preserve_alpn: false,
         }
     }
 
@@ -152,8 +159,16 @@ impl TlsConnector {
             cfg.set_aes_hw_override(random);
         }
 
-        // Set ALPN protocols
-        if let Some(version) = descriptor.version() {
+        // Set ALPN protocols. An enforced version narrows the list to the protocol it
+        // implies, unless `preserve_alpn` keeps a non-empty configured list.
+        let preserve = self.settings.preserve_alpn
+            && self
+                .settings
+                .alpn_protocols
+                .as_ref()
+                .is_some_and(|list| !list.is_empty());
+        let enforced_version = descriptor.version().filter(|_| !preserve);
+        if let Some(version) = enforced_version {
             match version {
                 Version::HTTP_11 | Version::HTTP_10 | Version::HTTP_09 => {
                     cfg.set_alpn_protos(&AlpnProtocol::HTTP1.encode())?;
@@ -197,7 +212,17 @@ impl TlsConnector {
         let host = uri.host().ok_or("URI missing host")?;
         let host = Self::normalize_host(host);
 
-        if let Some(ref cache) = self.cache {
+        let session_id = self
+            .settings
+            .client_hello_session_id
+            .as_ref()
+            .and_then(ClientHelloSessionId::get);
+
+        // A chosen session id and a resumption want the same slot, so the id wins and the
+        // cache is skipped entirely.
+        if let Some(ref cache) = self.cache
+            && session_id.is_none()
+        {
             let key = Key(descriptor.id());
 
             // If the session cache is enabled, we try to retrieve the session
@@ -213,6 +238,10 @@ impl TlsConnector {
 
             let idx = key_index()?;
             cfg.set_ex_data(idx, key);
+        }
+
+        if let Some(ref id) = session_id {
+            session_id::attach(self.ssl.context(), &mut cfg, id)?;
         }
 
         Ok(cfg.into_ssl(host)?)
@@ -303,6 +332,23 @@ impl TlsConnectorBuilder {
     #[inline]
     pub fn verify_hostname(mut self, enabled: bool) -> Self {
         self.verify_hostname = enabled;
+        self
+    }
+
+    /// Keeps the configured ALPN list even when a request enforces an HTTP version.
+    #[inline]
+    pub fn preserve_alpn(mut self, preserve: bool) -> Self {
+        self.preserve_alpn = preserve;
+        self
+    }
+
+    /// Sets the source of the ClientHello `legacy_session_id`.
+    #[inline]
+    pub fn client_hello_session_id<T>(mut self, source: T) -> Self
+    where
+        T: Into<Option<ClientHelloSessionId>>,
+    {
+        self.client_hello_session_id = source.into();
         self
     }
 
@@ -445,6 +491,8 @@ impl TlsConnectorBuilder {
             enable_ech_grease: opts.enable_ech_grease,
             key_shares: opts.key_shares.clone(),
             random_aes_hw_override: opts.random_aes_hw_override,
+            client_hello_session_id: self.client_hello_session_id.clone(),
+            preserve_alpn: self.preserve_alpn,
         };
 
         // If the session cache is disabled, we don't need to set up any callbacks.
