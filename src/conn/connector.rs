@@ -46,6 +46,7 @@ use crate::{
 #[derive(Clone)]
 struct Config {
     proxies: Arc<Vec<ProxyMatcher>>,
+    proxy_http2: Option<proxy::tunnel::ProxyHttp2>,
     verbose: Verbose,
     nodelay: bool,
     tls_info: bool,
@@ -99,6 +100,7 @@ impl ConnectorBuilder {
         Self {
             config: Config {
                 proxies: Arc::new(proxies),
+                proxy_http2: None,
                 verbose: Verbose::OFF,
                 nodelay: true,
                 tls_info: false,
@@ -129,6 +131,17 @@ impl ConnectorBuilder {
         F: FnOnce(TlsConnectorBuilder) -> TlsConnectorBuilder,
     {
         self.builder = call(self.builder);
+        self
+    }
+
+    /// The HTTP/2 client a `CONNECT` uses when an HTTPS proxy chooses h2.
+    #[inline]
+    pub(crate) fn proxy_http2(
+        mut self,
+        builder: wreq_proto::conn::http2::Builder<crate::rt::Executor>,
+        exec: crate::rt::Executor,
+    ) -> ConnectorBuilder {
+        self.config.proxy_http2 = Some(proxy::tunnel::ProxyHttp2 { builder, exec });
         self
     }
 
@@ -400,23 +413,22 @@ impl TransportConnector {
                     // Build an HTTPS connector.
                     let mut connector = self.build_https_connector(is_https, &descriptor)?;
 
-                    // Build a tunnel connector to establish the CONNECT tunnel.
+                    // The hop to the proxy is a connection of its own, built like any other: the
+                    // client's whole TLS profile, ALPN included, as a browser presents to a proxy.
                     let tunneled = {
-                        let mut tunnel =
-                            proxy::tunnel::TunnelConnector::new(proxy_uri, connector.clone());
-
-                        // If the proxy requires basic authentication, add it to the tunnel.
-                        if let Some(auth) = proxy.basic_auth() {
-                            tunnel = tunnel.with_auth(auth.clone());
-                        }
-
-                        // If the proxy has custom headers, add them to the tunnel.
-                        if let Some(headers) = proxy.custom_headers() {
-                            tunnel = tunnel.with_headers(headers.clone());
-                        }
-
-                        // Connect to the proxy and establish the tunnel.
-                        tunnel.call(uri).await?
+                        let headers =
+                            proxy::tunnel::Headers::new(proxy.basic_auth(), proxy.custom_headers());
+                        let hop = connector
+                            .call(descriptor.proxy_hop(proxy_uri))
+                            .await
+                            .map_err(proxy::tunnel::TunnelError::ConnectFailed)?;
+                        proxy::tunnel::connect_over(
+                            hop,
+                            &uri,
+                            &headers,
+                            self.config.proxy_http2.as_ref(),
+                        )
+                        .await?
                     };
 
                     // Wrap the established tunneled stream with TLS.
@@ -424,10 +436,13 @@ impl TransportConnector {
                         .call(EstablishedConn::new(tunneled, descriptor))
                         .await?;
 
-                    // Re-enable Nagle's algorithm if it was disabled earlier
+                    // Re-enable Nagle's algorithm if it was disabled earlier. An HTTP/2 tunnel's
+                    // socket belongs to its dispatcher and keeps it off.
                     if_tokio_rt!(block:{
-                        if !self.config.nodelay {
-                            io.as_ref().as_ref().set_nodelay(false)?;
+                        if !self.config.nodelay
+                            && let Some(hop) = io.as_ref().http1()
+                        {
+                            hop.as_ref().set_nodelay(false)?;
                         }
                     });
 

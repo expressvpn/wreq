@@ -509,7 +509,16 @@ impl ClientBuilder {
                 DynResolver::new(resolver)
             };
 
+            let proxy_http2 = {
+                let builder = wreq_proto::conn::http2::Builder::new(config.executor.clone())
+                    .timer(config.timer.clone());
+                match config.http2_options.clone() {
+                    Some(opts) => builder.options(opts),
+                    None => builder,
+                }
+            };
             let connector = ConnectorBuilder::new(config.proxies, resolver)
+                .proxy_http2(proxy_http2, config.executor.clone())
                 .timer(config.timer.clone())
                 .timeout(config.connect_timeout)
                 .tls_info(config.tls_info)
