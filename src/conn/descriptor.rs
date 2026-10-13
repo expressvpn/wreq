@@ -140,4 +140,18 @@ impl ConnectionDescriptor {
     pub(crate) fn socket_bind_options(&self) -> Option<&SocketBindOptions> {
         self.socket_bind.as_ref()
     }
+
+    /// The hop to `proxy_uri` for this connection: the same TLS options and socket binding, no
+    /// enforced version (a browser offers a proxy its full ALPN list) and an id of its own, so
+    /// the proxy's TLS sessions are never filed under the origin's.
+    pub(crate) fn proxy_hop(&self, proxy_uri: Uri) -> ConnectionDescriptor {
+        ConnectionDescriptor::new(
+            proxy_uri,
+            Group::default(),
+            None,
+            None,
+            self.tls_options.clone(),
+            self.socket_bind.clone(),
+        )
+    }
 }

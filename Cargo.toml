@@ -55,13 +55,13 @@ form = ["dep:serde", "dep:serde_html_form"]
 json = ["dep:serde", "dep:serde_json"]
 
 # Enable multipart/form-data support.
-multipart = ["dep:mime_guess", "dep:sync_wrapper", "sync_wrapper?/futures"]
+multipart = ["dep:mime_guess", "sync_wrapper/futures"]
 
 # Enable hickory DNS resolver.
 hickory-dns = ["dep:hickory-resolver"]
 
 # Enable streaming support.
-stream = ["dep:tokio-util", "dep:sync_wrapper", "sync_wrapper?/futures"]
+stream = ["dep:tokio-util", "sync_wrapper/futures"]
 
 # Enable SOCKS/4/5 proxy support.
 socks = ["dep:tokio-socks"]
@@ -128,7 +128,7 @@ encoding_rs = { version = "0.8", optional = true }
 mime = { version = "0.3.17", optional = true }
 
 ## sync wrapper
-sync_wrapper = { version = "1.0.2", optional = true }
+sync_wrapper = "1.0.2"
 
 ## webpki root certs
 webpki-root-certs = { version = "1.0.7", optional = true }
