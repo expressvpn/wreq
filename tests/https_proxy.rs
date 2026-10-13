@@ -77,6 +77,14 @@ struct Seen {
 
 /// A TLS proxy preferring `alpn`, tunnelling every CONNECT to the address it names.
 async fn proxy(alpn: &'static [u8]) -> (SocketAddr, Arc<Mutex<Vec<Seen>>>) {
+    proxy_counting(alpn, Arc::default()).await
+}
+
+/// [`proxy`], noting in `hops` for each accepted connection whether it resumed a TLS session.
+async fn proxy_counting(
+    alpn: &'static [u8],
+    hops: Arc<Mutex<Vec<bool>>>,
+) -> (SocketAddr, Arc<Mutex<Vec<Seen>>>) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let seen = Arc::new(Mutex::new(Vec::new()));
@@ -88,6 +96,7 @@ async fn proxy(alpn: &'static [u8]) -> (SocketAddr, Arc<Mutex<Vec<Seen>>>) {
                 continue;
             };
             let negotiated = tls.ssl().selected_alpn_protocol().map(<[u8]>::to_vec);
+            hops.lock().unwrap().push(tls.ssl().session_reused());
             let log = log.clone();
             let service = service_fn(move |mut req: Request<Incoming>| {
                 let log = log.clone();
@@ -138,6 +147,7 @@ fn tls_options() -> TlsOptions {
         .alpn_protocols([AlpnProtocol::HTTP2, AlpnProtocol::HTTP1])
         .alps_protocols([AlpsProtocol::HTTP2])
         .enable_ech_grease(true)
+        .pre_shared_key(true)
         .build()
 }
 
@@ -296,4 +306,30 @@ async fn the_connect_head_on_http1_is_unchanged() {
             "CONNECT origin.test:443 HTTP/1.1\r\nHost: origin.test:443\r\nProxy-Authorization: {AUTH}\r\n\r\n"
         )
     );
+}
+
+/// A proxy hop resumes a TLS session only within the request group that made it: a ticket
+/// shared across groups would link the connections the groups keep apart.
+#[tokio::test]
+async fn a_proxy_session_is_resumed_only_within_its_group() {
+    let origin = origin().await;
+    let hops = Arc::new(Mutex::new(Vec::new()));
+    let (proxy, _) = proxy_counting(H1, hops.clone()).await;
+    let client = wreq::Client::builder()
+        .tls_options(tls_options())
+        .tls_cert_verification(false)
+        .pool_max_idle_per_host(0)
+        .proxy(wreq::Proxy::all(format!("https://{proxy}")).unwrap())
+        .build()
+        .unwrap();
+    for group in ["a", "a", "b"] {
+        let res = client
+            .get(format!("https://{origin}/"))
+            .group(wreq::Group::new(group))
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(res.text().await.unwrap(), "origin");
+    }
+    assert_eq!(*hops.lock().unwrap(), [false, true, false]);
 }

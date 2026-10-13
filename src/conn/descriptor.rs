@@ -143,11 +143,15 @@ impl ConnectionDescriptor {
 
     /// The hop to `proxy_uri` for this connection: the same TLS options and socket binding, no
     /// enforced version (a browser offers a proxy its full ALPN list) and an id of its own, so
-    /// the proxy's TLS sessions are never filed under the origin's.
+    /// the proxy's TLS sessions are never filed under the origin's. That id nests this
+    /// connection's whole group: a proxy session is resumed only by the same request group to
+    /// the same origin, or a session ticket would link connections the groups keep apart.
     pub(crate) fn proxy_hop(&self, proxy_uri: Uri) -> ConnectionDescriptor {
+        let mut group = Group::default();
+        group.request(self.connection_id.0.0.clone());
         ConnectionDescriptor::new(
             proxy_uri,
-            Group::default(),
+            group,
             None,
             None,
             self.tls_options.clone(),
